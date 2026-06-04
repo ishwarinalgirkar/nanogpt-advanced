@@ -2,7 +2,7 @@
 
 import torch.nn as nn
 from .attention import CausalSelfAttention
-from .rmsnorm import RMSNorm
+from .normalization import RMSNorm
 from .swiglu import SwiGLU
 
 
