@@ -1,19 +1,36 @@
-"""Packing dataloader and dataset utilities (skeleton)."""
+import numpy as np
+import torch
 
-from torch.utils.data import Dataset
+def get_batch(split, config):
+    """
+    Sample a random batch from the memory-mapped token file.
+    """
+    data = np.memmap(config['data_path'], dtype=np.uint16, mode='r')
 
+    # train/val split by position in file
+    n_val   = int(len(data) * config.get('val_split', 0.005))
+    n_train = len(data) - n_val
 
-class TextDataset(Dataset):
-    """Dataset that yields packed sequences from tokenized data."""
+    if split == 'train':
+        data = data[:n_train]
+    else:
+        data = data[n_train:]
 
-    def __init__(self, tokens, block_size):
-        self.tokens = tokens
-        self.block_size = block_size
+    B, T    = config['batch_size'], config['max_seq']
 
-    def __len__(self):
-        return max(0, len(self.tokens) - self.block_size)
+    # random starting positions
+    ix = torch.randint(len(data) - T, (B,))
 
-    def __getitem__(self, idx):
-        x = self.tokens[idx: idx + self.block_size]
-        y = self.tokens[idx + 1: idx + 1 + self.block_size]
-        return x, y
+    # x is tokens at positions i..i+T-1
+    # y is tokens at positions i+1..i+T
+    x = torch.stack([torch.from_numpy(data[i:i+T].astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy(data[i+1:i+T+1].astype(np.int64)) for i in ix])
+
+    device = config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
+    if device == 'cuda':
+        x = x.pin_memory().to(device, non_blocking=True)
+        y = y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+
+    return x, y

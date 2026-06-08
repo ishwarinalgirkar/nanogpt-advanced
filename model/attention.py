@@ -1,31 +1,48 @@
-"""Causal multi-head attention with RoPE (skeleton).
-
-Provides a minimal causal attention module that can be wired into the
-transformer block. This is a structural placeholder and not optimized.
-"""
-
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
+from .rope import apply_rope
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, n_embd, n_head, dropout=0.0):
+    """
+    Multi-head attention with RoPE on Q and K (not V).
+    Uses FlashAttention (scaled_dot_product_attention) for efficiency.
+    """
+    def __init__(self, d_model, n_heads, dropout=0.0):
         super().__init__()
-        assert n_embd % n_head == 0
-        self.n_head = n_head
-        self.head_dim = n_embd // n_head
-        self.qkv = nn.Linear(n_embd, 3 * n_embd)
-        self.out = nn.Linear(n_embd, n_embd)
-        self.dropout = nn.Dropout(dropout)
+        assert d_model % n_heads == 0
+        self.n_heads  = n_heads
+        self.head_dim = d_model // n_heads
 
-    def forward(self, x):
-        B, T, C = x.size()
-        qkv = self.qkv(x).view(B, T, 3, self.n_head, self.head_dim)
-        q, k, v = qkv.unbind(dim=2)
-        # Simple scaled dot-product attention with causal mask
-        att = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
-        mask = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0)
-        att = att.masked_fill(mask == 0, float('-inf'))
-        att = torch.softmax(att, dim=-1)
-        out = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
-        return self.out(self.dropout(out))
+        # Q, K, V projections — no bias (RMSNorm before us handles mean)
+        self.q_proj   = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj   = nn.Linear(d_model, d_model, bias=False)
+        self.v_proj   = nn.Linear(d_model, d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.dropout  = dropout
+
+    def forward(self, x, cos, sin):
+        B, T, C = x.shape
+
+        # project and reshape: [B, T, C] → [B, n_heads, T, head_dim]
+        def split_heads(t):
+            return t.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        q = split_heads(self.q_proj(x))
+        k = split_heads(self.k_proj(x))
+        v = split_heads(self.v_proj(x))
+
+        # apply RoPE to Q and K only
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
+
+        # FlashAttention handles causal mask, dropout, scaling
+        y = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=True
+        )
+
+        # merge heads: [B, n_heads, T, head_dim] → [B, T, C]
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.out_proj(y)
